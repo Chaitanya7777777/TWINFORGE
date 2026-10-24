@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from datetime import datetime, timezone
 
 import httpx
 from pydantic import ValidationError
@@ -8,12 +9,15 @@ from app.config import SYNC_POLL_INTERVAL_SECONDS
 from app.connectors.simulator import get_snapshot
 from app.twin.mapper import simulator_asset_to_twin
 from app.twin.registry import TwinRegistry
+from app.storage.postgres import PersistenceError
 
 
 logger = logging.getLogger(__name__)
 
 
 def summarize_sync_error(error: Exception) -> str:
+    if isinstance(error, PersistenceError):
+        return "Database persistence failed; snapshot not accepted"
     if isinstance(error, httpx.TimeoutException):
         return "Simulator request timed out"
     if isinstance(error, httpx.HTTPStatusError):
@@ -31,11 +35,15 @@ class SyncService:
         registry: TwinRegistry,
         snapshot_fetcher=get_snapshot,
         poll_interval_seconds: float = SYNC_POLL_INTERVAL_SECONDS,
+        store=None,
     ):
         self.registry = registry
         self.snapshot_fetcher = snapshot_fetcher
         self.poll_interval_seconds = poll_interval_seconds
         self.running = False
+        self.store = store
+        self.last_persistence_error = None
+        self.last_persisted_at = None
         self._sync_lock = asyncio.Lock()
         self._stop_event = asyncio.Event()
 
@@ -46,10 +54,28 @@ class SyncService:
             try:
                 snapshot = await self.snapshot_fetcher()
                 run_id = snapshot["run_id"]
+                if not isinstance(run_id, str) or not run_id:
+                    raise ValueError("Invalid run ID")
                 twins = [
                     simulator_asset_to_twin(asset)
                     for asset in snapshot["assets"]
                 ]
+
+                if len({t.asset_id for t in twins}) != len(twins) or any(t.sequence < 0 for t in twins):
+                    raise ValueError("Invalid asset sequences or duplicate assets")
+                candidates = [t for t in twins if (
+                    self.registry.current_run_id != run_id
+                    or self.registry.get(t.asset_id) is None
+                    or t.sequence > self.registry.get(t.asset_id).sequence
+                )]
+                if self.store is not None:
+                    try:
+                        await self.store.save(run_id, candidates, datetime.now(timezone.utc))
+                    except PersistenceError:
+                        self.last_persistence_error = "Database persistence failed; snapshot not accepted"
+                        raise
+                    self.last_persisted_at = datetime.now(timezone.utc)
+                    self.last_persistence_error = None
 
                 if self.registry.current_run_id != run_id:
                     self.registry.reset_for_new_run(run_id)

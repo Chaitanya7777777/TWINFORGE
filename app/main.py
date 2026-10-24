@@ -2,15 +2,18 @@ import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 
-from app.config import SOURCE_STALE_AFTER_SECONDS
+from app.config import SOURCE_STALE_AFTER_SECONDS, DATABASE_URL, DATABASE_TIMEOUT_SECONDS
+from app.storage.postgres import PostgresStore, PersistenceError
+from app.storage.models import ObservationRecord, MachineEventRecord
 from app.twin.registry import TwinRegistry
 from app.services.sync_service import SyncService
 
 
 registry = TwinRegistry()
-sync_service = SyncService(registry)
+store = PostgresStore(DATABASE_URL, DATABASE_TIMEOUT_SECONDS) if DATABASE_URL else None
+sync_service = SyncService(registry, store=store)
 
 
 @asynccontextmanager
@@ -25,7 +28,15 @@ async def lifespan(app: FastAPI):
     finally:
         # Wake the polling loop and wait for it to finish cleanly.
         sync_service.stop()
-        await sync_task
+        # Cancellation is awaited, including database transaction cleanup.
+        sync_task.cancel()
+        try:
+            await sync_task
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if store is not None:
+                await store.close()
 
 
 app = FastAPI(
@@ -44,7 +55,10 @@ def health():
 
 @app.post("/sync")
 async def sync_twins():
-    result = await sync_service.sync_once()
+    try:
+        result = await sync_service.sync_once()
+    except PersistenceError:
+        raise HTTPException(503, "Database persistence failed; snapshot not accepted") from None
 
     return {
         "status": "synced",
@@ -90,3 +104,33 @@ def source_status():
         "sync_lag_seconds": sync_lag_seconds,
         "stale_after_seconds": SOURCE_STALE_AFTER_SECONDS,
     }
+
+
+@app.get("/api/persistence-status")
+def persistence_status():
+    return {
+        "enabled": store is not None,
+        "last_persisted_at": sync_service.last_persisted_at,
+        "last_error": sync_service.last_persistence_error,
+    }
+
+
+async def read_history(asset_id, kind, limit, after_id, run_id):
+    if store is None:
+        raise HTTPException(503, "Persistence is not configured")
+    try:
+        return await store.history(asset_id, kind, limit, after_id, run_id)
+    except PersistenceError:
+        raise HTTPException(503, "Historical storage is unavailable") from None
+
+
+@app.get("/api/twins/{asset_id}/telemetry", response_model=list[ObservationRecord])
+async def telemetry_history(asset_id: str, limit: int = Query(100, ge=1, le=1000),
+                            after_id: int = Query(0, ge=0), run_id: str | None = None):
+    return await read_history(asset_id, "telemetry", limit, after_id, run_id)
+
+
+@app.get("/api/twins/{asset_id}/history", response_model=list[MachineEventRecord])
+async def machine_history(asset_id: str, limit: int = Query(100, ge=1, le=1000),
+                          after_id: int = Query(0, ge=0), run_id: str | None = None):
+    return await read_history(asset_id, "history", limit, after_id, run_id)
