@@ -1,9 +1,10 @@
 import asyncio
 from contextlib import asynccontextmanager
-
-from fastapi import FastAPI, HTTPException
 from datetime import datetime, timezone
 
+from fastapi import FastAPI, HTTPException
+
+from app.config import SOURCE_STALE_AFTER_SECONDS
 from app.twin.registry import TwinRegistry
 from app.services.sync_service import SyncService
 
@@ -19,11 +20,12 @@ async def lifespan(app: FastAPI):
         sync_service.run_forever()
     )
 
-    yield
-
-    # Stop cleanly when TWINFORGE shuts down
-    sync_service.stop()
-    sync_task.cancel()
+    try:
+        yield
+    finally:
+        # Wake the polling loop and wait for it to finish cleanly.
+        sync_service.stop()
+        await sync_task
 
 
 app = FastAPI(
@@ -65,24 +67,26 @@ def get_twin(asset_id: str):
             detail="Twin not found"
         )
 
-    return 
+    return twin
 
 @app.get("/api/source-status")
 def source_status():
-
-    lag_seconds = None
+    sync_lag_seconds = None
 
     if registry.last_sync_at is not None:
         now = datetime.now(timezone.utc)
-
-        lag_seconds = (
+        sync_lag_seconds = (
             now - registry.last_sync_at
         ).total_seconds()
 
     return {
         "source": "factory_simulator",
-        "connected": registry.source_connected,
+        "connected": registry.is_source_connected(SOURCE_STALE_AFTER_SECONDS),
         "run_id": registry.current_run_id,
         "last_sync_at": registry.last_sync_at,
-        "sync_lag_seconds": lag_seconds
+        "last_sync_attempt_at": registry.last_sync_attempt_at,
+        "last_sync_error": registry.last_sync_error,
+        "consecutive_failures": registry.consecutive_failures,
+        "sync_lag_seconds": sync_lag_seconds,
+        "stale_after_seconds": SOURCE_STALE_AFTER_SECONDS,
     }
