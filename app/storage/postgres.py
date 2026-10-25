@@ -118,15 +118,17 @@ class PostgresStore:
                 for kind, before, after in events:
                     await conn.execute("INSERT INTO machine_events(observation_id,kind,previous_value,value) VALUES ($1,$2,$3,$4)", oid, kind, before, after)
 
-    async def history(self, asset_id, kind, limit=100, after_id=0, run_id=None):
+    async def history(self, asset_id, kind, limit=100, after_id=0, run_id=None, *, latest=False):
         if kind not in ("telemetry", "history") or not 1 <= limit <= 1000 or after_id < 0:
             raise ValueError("Invalid history query")
         async with self.connection() as conn:
             if kind == "telemetry":
-                rows = await conn.fetch("""SELECT id,source,run_id,asset_id,sequence,observed_at,
+                # Opt-in bounded recent telemetry; existing forward paging is unchanged.
+                order = "DESC" if latest else "ASC"
+                rows = await conn.fetch(f"""SELECT id,source,run_id,asset_id,sequence,observed_at,
                     source_timestamp,raw_source_timestamp,telemetry_values,valid,fresh,quality_source,reason
                     FROM observations WHERE asset_id=$1 AND id>$2 AND ($3::text IS NULL OR run_id=$3)
-                    ORDER BY id LIMIT $4""", asset_id, after_id, run_id, limit)
+                    ORDER BY id {order} LIMIT $4""", asset_id, after_id, run_id, limit)
             else:
                 rows = await conn.fetch("""SELECT e.id,o.source,o.run_id,o.asset_id,o.sequence,o.observed_at,
                     e.kind,e.previous_value,e.value FROM machine_events e JOIN observations o ON o.id=e.observation_id

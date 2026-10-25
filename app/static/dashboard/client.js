@@ -14,15 +14,15 @@ export class ApiError extends Error {
   /** @param {number} status @param {string} detail */
   constructor(status, detail) { super(`HTTP ${status}: ${detail}`); this.status = status; }
 }
-/** @template T @param {string} path @param {AbortSignal} [signal] @returns {Promise<T>} */
-async function request(path, signal) {
+/** @template T @param {string} path @param {AbortSignal} [signal] @param {unknown} [payload] @returns {Promise<T>} */
+async function request(path, signal, payload) {
   const controller = new AbortController();
   const abort = () => controller.abort();
   signal?.addEventListener('abort', abort, {once: true});
   if (signal?.aborted) abort();
   const timer = setTimeout(abort, 10000);
   try {
-    const response = await fetch(base + path, {method: 'GET', cache: 'no-store', signal: controller.signal});
+    const response = await fetch(base + path, {method: payload === undefined ? 'GET' : 'POST', cache: 'no-store', signal: controller.signal, ...(payload === undefined ? {} : {headers: {'Content-Type':'application/json'}, body:JSON.stringify(payload)})});
     const body = await response.json().catch(() => null);
     if (!response.ok) throw new ApiError(response.status,
       typeof body?.detail === 'string' ? body.detail : response.status === 422 ? 'Invalid query. Check identifiers and timezone-aware timestamps.' : 'Request failed');
@@ -38,6 +38,12 @@ export function queryPath(selection, kind, params) {
   return `/api/twins/${encodeURIComponent(selection.asset)}/${kind}?${new URLSearchParams({...params,run_id:selection.run})}`;
 }
 export const api = {
+  /** @param {Selection} s @param {AbortSignal} [signal] @returns {Promise<import('./contracts').PredictiveResult>} */
+  predictive: (s, signal) => request(queryPath(s, 'predictive-health', {method:'z_score_ewma'}), signal),
+  /** @param {import('./contracts').MaintenanceRequest} body @param {AbortSignal} [signal] @returns {Promise<import('./contracts').MaintenanceComparison>} */
+  compareMaintenance: (body, signal) => request('/api/scenarios/maintenance/compare', signal, body),
+  /** @param {import('./contracts').MaintenanceRequest} body @param {AbortSignal} [signal] @returns {Promise<import('./contracts').MaintenanceRecommendation>} */
+  recommendMaintenance: (body, signal) => request('/api/recommendations/maintenance', signal, {...body,predictive_method:'z_score_ewma'}),
   /** @param {AbortSignal} [signal] @returns {Promise<Twin[]>} */
   twins: signal => request('/api/twins', signal),
   /** @param {string} id @param {AbortSignal} [signal] @returns {Promise<Twin>} */

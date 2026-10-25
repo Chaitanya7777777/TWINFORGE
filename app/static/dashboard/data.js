@@ -23,9 +23,9 @@ export function parseRoute(hash) {
   const [path, query = ''] = hash.replace(/^#\/?/, '').split('?');
   const parts = path.split('/');
   const params = new URLSearchParams(query);
-  const pages = ['overview','machines','kpi','health','history'];
+  const pages = ['overview','machines','kpi','health','history','decision'];
   let asset = params.get('asset') || '';
-  try { if (parts[0] === 'machines' && parts[1]) asset = decodeURIComponent(parts[1]); } catch { asset = ''; }
+  try { if (['machines','decision'].includes(parts[0]) && parts[1]) asset = decodeURIComponent(parts[1]); } catch { asset = ''; }
   return {page:pages.includes(parts[0]) ? parts[0] : 'overview', asset,
     run:params.get('run') || '',source:params.get('source') || 'factory_simulator',
     search:params.get('search') || '',state:params.get('state') || '',
@@ -33,7 +33,7 @@ export function parseRoute(hash) {
 }
 /** @param {Partial<Route>} route */
 export function routeUrl(route) {
-  const path = route.page === 'machines' && route.asset ? `machines/${encodeURIComponent(route.asset)}` : route.page || 'overview';
+  const path = ['machines','decision'].includes(route.page) && route.asset ? `${route.page}/${encodeURIComponent(route.asset)}` : route.page || 'overview';
   const params = new URLSearchParams();
   for (const key of ['asset','run','source','search','state','factory','line']) if(route[key]) params.set(key,route[key]);
   return `#/${path}${params.size ? '?'+params : ''}`;
