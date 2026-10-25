@@ -18,3 +18,7 @@ DATABASE_URL = os.getenv("TWINFORGE_DATABASE_URL") or None
 DATABASE_TIMEOUT_SECONDS = float(os.getenv("TWINFORGE_DATABASE_TIMEOUT_SECONDS", "5"))
 if not math.isfinite(DATABASE_TIMEOUT_SECONDS) or DATABASE_TIMEOUT_SECONDS <= 0:
     raise ValueError("TWINFORGE_DATABASE_TIMEOUT_SECONDS must be positive and finite")
+
+KPI_MAX_GAP_SECONDS = float(os.getenv("TWINFORGE_KPI_MAX_GAP_SECONDS", "5"))
+if not math.isfinite(KPI_MAX_GAP_SECONDS) or KPI_MAX_GAP_SECONDS <= 0:
+    raise ValueError("TWINFORGE_KPI_MAX_GAP_SECONDS must be positive and finite")

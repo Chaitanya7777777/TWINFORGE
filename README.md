@@ -1,11 +1,27 @@
 # TWINFORGE
 
+For the current implementation, setup, verification and remaining work, start
+with [TWINFORGE_CURRENT_STATUS.md](TWINFORGE_CURRENT_STATUS.md).
+
 TWINFORGE is a retrofit-first manufacturing digital-twin service. It polls the
 Factory Simulator, maps simulator assets to canonical machine twins, and keeps
 the latest accepted twins in memory. PostgreSQL stores accepted observations
 and observed machine history when configured.
 
 ## Running locally
+
+Build the five-view Operator Dashboard before opening `/dashboard/`:
+
+```powershell
+cd frontend
+npm.cmd ci
+npm.cmd run build
+cd ..
+```
+
+The existing vanilla-JavaScript frontend is served by FastAPI on the same origin.
+See [dashboard setup, API semantics and verification](docs/operator-dashboard.md)
+and `frontend/.env.example` for the optional build-time API path prefix.
 
 The Factory Simulator normally runs on `http://127.0.0.1:8000`. Start TWINFORGE
 on a different port:
@@ -144,7 +160,8 @@ with a lost acknowledgement can be safely retried because of idempotency.
 History survives application restarts. The live registry still starts empty and
 is filled by the next successful sync; it is not hydrated from old history. A
 stopped or disconnected simulator does not prevent database history reads.
-No retention policy, analytics, replay, or KPI engine is implemented.
+No retention policy or replay is implemented. The independent KPI engine is
+described below; it does not reconstruct missing observations.
 
 ## Historical read APIs
 
@@ -227,3 +244,95 @@ deduplication, source disconnection, failed persistence during a database outage
 unchanged success timestamps, and automatic retry with state/fault/recovery
 events. It leaves verification observations in the dedicated database and stops
 its application/fixture processes. It does not modify the Factory Simulator.
+
+## Independent KPI engine (kpi.v1)
+
+The read-only [Operator Dashboard](docs/operator-dashboard.md) is available at
+`http://127.0.0.1:8001/dashboard/` when TWINFORGE is running. It uses the existing
+APIs. Build the vanilla-JavaScript frontend using the npm commands above; FastAPI
+serves the resulting assets. uPlot provides charts; esbuild bundles the frontend.
+
+Read the versioned [calculation contract](docs/kpi-v1.md) for exact formulas,
+input requirements, units, timestamp semantics, and missing-data behavior.
+Pure functions are in `app/kpi/engine.py`; `app/kpi/service.py` handles history
+retrieval. The HTTP route contains no formulas. No new dependency is required.
+
+Apply migration 002 before running this version with persistence enabled:
+
+```powershell
+.\.venv\Scripts\python.exe -m app.storage.migrate
+```
+
+The additive migration stores nullable canonical good/reject/total counters and
+interval-average power/duration. Existing history is preserved, with null values
+for inputs that were not captured. No synthetic backfill occurs. New operational
+fields remain internal to canonical twins so existing twin JSON stays compatible.
+
+`GET /api/twins/{asset_id}/kpis` requires `run_id`, `start`, and `end`, with an
+optional `source` defaulting to `factory_simulator`. Use timezone-aware ISO 8601
+source timestamps (encode `+` as `%2B` in raw URLs, or use `Z`). For example:
+
+```text
+/api/twins/QC_01/kpis?run_id=YOUR_RUN&start=2024-01-01T00:00:01Z&end=2024-01-01T00:02:00Z
+```
+
+The maximum window is 24 hours and 10,000 observations. Both boundaries must
+match stored source timestamps. Results include the normalized UTC window,
+asset/source/run identifiers, coverage, completeness reasons, and metric objects
+with `value`, `unit`, `status`, and `reason`. Downtime reason seconds are included
+only for complete recognized-state windows. The OpenAPI response is `KpiResult`.
+Invalid requests or oversized result sets return 422; unavailable storage returns
+503; empty/insufficient data returns 200 with unknown metrics rather than zeros.
+
+Supported outputs are quality, reject rate, asset good-unit throughput, integrated
+energy, energy per good unit, and sampled downtime/reasons. Energy and downtime
+are labelled estimated. Availability, performance, OEE, and WIP are explicitly
+unknown through the API because schedules, trustworthy runtime, certified ideal
+cycle times, and unit-flow records are absent. Standard OEE formulas are tested
+independently using complete synthetic inputs, not simulator precomputed KPIs.
+
+`TWINFORGE_KPI_MAX_GAP_SECONDS` defaults to 5 (positive finite seconds). This is
+the maximum tolerated source-time spacing, not a grace period for missing
+sequence numbers. Sequence gaps, stale/invalid flags, timestamp regressions,
+missing boundaries, and mixed context never become verified zero production or
+downtime. Counter resets invalidate counter-based outputs. History queries stay
+available after source disconnection; genuinely complete old windows remain valid.
+
+### Controlled reference validation
+
+The explicit script below runs the separate simulator's `Simulator` class in a
+fresh subprocess, disables bytecode writes, writes logs only to a TwinForge
+temporary directory, and stores observations in a disposable PostgreSQL test
+schema. Set `TWINFORGE_TEST_DATABASE_URL` to the dedicated `twinforge_test` database.
+The simulator repository and live simulator are not modified:
+
+```powershell
+.\.venv\Scripts\python.exe tests/manual_kpi_reference.py --simulator-repo '..\factory-simulator'
+```
+
+Verified baseline: seed 42, 120 steps, 360 persisted observations, window
+`2024-01-01T00:00:01Z` to `2024-01-01T00:02:00Z` (119 seconds).
+
+| Comparison | TwinForge | Reference for the same window |
+| --- | ---: | ---: |
+| QC quality | 0.95 | 0.95 |
+| QC reject rate | 0.05 | 0.05 |
+| QC good units/hour | 574.7899159664 | 574.7899159664 |
+| Sum of asset energy (kWh) | 0.1715 | 0.1715 |
+
+The simulator's since-start throughput is 570/hour over 120 seconds; TwinForge
+does not invent the missing step-zero telemetry boundary. The simulator's
+fault-only downtime is zero in this run, while TwinForge's non-running sampled
+durations are 79/59/99 seconds (CNC/MILL/QC), including idle. These definitions
+are intentionally different and must not be presented as equivalent OEE downtime.
+Line energy-per-good-unit and WIP are not exposed by the asset endpoint. Reference
+factory metrics and cumulative energy are stripped from snapshots before sync;
+they are used only for the independent comparison assertions.
+
+Run all unit/API and real PostgreSQL regression tests with:
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -m compileall -q app tests
+git diff --check
+```

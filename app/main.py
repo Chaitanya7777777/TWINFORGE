@@ -1,12 +1,20 @@
 import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.staticfiles import StaticFiles
 
 from app.config import SOURCE_STALE_AFTER_SECONDS, DATABASE_URL, DATABASE_TIMEOUT_SECONDS
-from app.storage.postgres import PostgresStore, PersistenceError
+from app.storage.postgres import PostgresStore, PersistenceError, HistoryWindowTooLarge
+from app.health.models import Assessment, utc
+from app.health.service import asset_health
 from app.storage.models import ObservationRecord, MachineEventRecord
+from app.kpi.models import KpiResult
+from app.kpi.service import asset_kpis
+from app.kpi.engine import validate_window
+from app.config import KPI_MAX_GAP_SECONDS
 from app.twin.registry import TwinRegistry
 from app.services.sync_service import SyncService
 
@@ -43,6 +51,10 @@ app = FastAPI(
     title="TWINFORGE",
     lifespan=lifespan
 )
+
+app.mount("/dashboard", StaticFiles(
+    directory=Path(__file__).resolve().parent / "static" / "dashboard", html=True
+), name="dashboard")
 
 
 @app.get("/health")
@@ -134,3 +146,53 @@ async def telemetry_history(asset_id: str, limit: int = Query(100, ge=1, le=1000
 async def machine_history(asset_id: str, limit: int = Query(100, ge=1, le=1000),
                           after_id: int = Query(0, ge=0), run_id: str | None = None):
     return await read_history(asset_id, "history", limit, after_id, run_id)
+
+
+@app.get("/api/twins/{asset_id}/kpis", response_model=KpiResult)
+async def get_kpis(asset_id: str, start: datetime, end: datetime,
+                   run_id: str = Query(..., min_length=1, max_length=200),
+                   source: str = Query("factory_simulator", min_length=1, max_length=200)):
+    try:
+        start, end = validate_window(start, end)
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from None
+    if store is None:
+        raise HTTPException(503, "Persistence is not configured")
+    try:
+        return await asset_kpis(store, source=source, run_id=run_id, asset_id=asset_id,
+                                start=start, end=end, max_gap_seconds=KPI_MAX_GAP_SECONDS)
+    except PersistenceError:
+        raise HTTPException(503, "Historical storage is unavailable") from None
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from None
+
+
+@app.get("/api/twins/{asset_id}/health-assessment", response_model=Assessment)
+async def get_health_assessment(
+    asset_id: str, start: datetime, end: datetime, assessment_generated_at: datetime,
+    source: str = Query(..., min_length=1, max_length=200),
+    run_id: str = Query(..., min_length=1, max_length=200),
+):
+    # Validate request data separately: ValueErrors from persisted evidence are
+    # internal failures, not client errors, and must not expose their details.
+    try:
+        start, end, generated = map(utc, (start, end, assessment_generated_at))
+        if not asset_id.strip() or not source.strip() or not run_id.strip():
+            raise ValueError("Nonblank asset_id, source and run_id required")
+        if not 0 < (end-start).total_seconds() <= 86400:
+            raise ValueError("Health window must be positive and at most 24 hours")
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from None
+    if store is None:
+        raise HTTPException(503, "Persistence is not configured")
+    try:
+        return await asset_health(
+            store, source=source, run_id=run_id, asset_id=asset_id,
+            window_start=start, window_end=end, assessment_generated_at=generated,
+        )
+    except HistoryWindowTooLarge:
+        raise HTTPException(422, "Health evidence exceeds supported bounds; use a smaller window") from None
+    except PersistenceError:
+        raise HTTPException(503, "Historical storage is unavailable") from None
+    except Exception:
+        raise HTTPException(500, "Health assessment failed") from None

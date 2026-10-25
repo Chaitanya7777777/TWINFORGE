@@ -57,7 +57,9 @@ class SyncService:
                 if not isinstance(run_id, str) or not run_id:
                     raise ValueError("Invalid run ID")
                 twins = [
-                    simulator_asset_to_twin(asset)
+                    simulator_asset_to_twin(
+                        asset, snapshot.get("factory", {}).get("config", {}).get("step_seconds")
+                    )
                     for asset in snapshot["assets"]
                 ]
 
