@@ -1,10 +1,11 @@
 # Operator Dashboard · Milestone 4
 
 Read-only HTML/CSS/JavaScript modules served by FastAPI at
-<http://127.0.0.1:8001/dashboard/>. The five-screen reference redesign reuses the
+<http://127.0.0.1:8001/dashboard/>. The operator dashboard reuses the
 existing vanilla-JavaScript frontend. It uses uPlot for charts and esbuild for the
 production bundle; there is no separate frontend server or framework. Source strings are rendered
-as text. All dashboard requests are GETs to same-origin TWINFORGE APIs; there are
+as text. Dashboard reads use GET; explicit what-if and recommendation calculations
+use POST to same-origin TWINFORGE APIs. Both POSTs are read-only calculations; there are
 no simulator requests or machine controls. The existing application synchronization
 loop still runs independently of the dashboard.
 
@@ -29,11 +30,11 @@ Generated files under `app/static/dashboard/build` are ignored by Git; build aft
 a fresh checkout. `npm.cmd run typecheck` checks the typed API/data boundary;
 `npm.cmd run lint` checks JavaScript syntax and unsafe-rendering patterns.
 
-## Five views
+## Views
 
 Hash routes preserve the selected canonical asset, run and source without adding
 backend routes: `/dashboard/#/overview`, `#/machines/{encoded_asset_id}`, `#/kpi`,
-`#/health`, and `#/history`. Query parameters include `asset`, `run`, `source`,
+`#/health`, `#/history`, and `#/decision/{encoded_asset_id}`. Query parameters include `asset`, `run`, `source`,
 and overview filters. Use the shared machine/run controls to apply a selection.
 The current source run can be copied explicitly; historical run IDs can be entered
 manually. No complete run catalog exists. Overview search and filters operate on
@@ -155,7 +156,9 @@ Manual browser acceptance checklist (not implied by Python/Node test success):
    the new selection. Observe a source run change using a test fixture (do not
    mutate the shared simulator); historical context must invalidate.
 7. Hide/restore the tab and inspect network requests for serialized polling and
-   GET-only traffic. The dashboard must never call `/sync` or port 8000.
+   GET reads and the two explicit calculation-only POSTs (`/api/scenarios/maintenance/compare`
+   and `/api/recommendations/maintenance`). The dashboard must never call `/sync`
+   or simulator mutation endpoints.
 
 Historical verification of the earlier single-page implementation: 56 Python tests passed, including 10 real PostgreSQL
 tests on the dedicated local database. All 15 Node tests passed, including the

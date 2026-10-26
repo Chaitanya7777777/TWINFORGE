@@ -325,3 +325,18 @@ class PostgresIntegrationTests(unittest.IsolatedAsyncioTestCase):
         start = datetime(2024, 1, 1, tzinfo=timezone.utc)
         with self.assertRaises(HistoryWindowTooLarge):
             await self.store.kpi_observations('factory_simulator', 'run-1', 'CNC_01', start, start+timedelta(hours=4))
+
+    async def test_predictive_latest_telemetry_and_forward_compatibility(self):
+        from app.predictive.service import assess_predictive_health
+        for seq in range(1, 36):
+            await self.save(seq, values={'temperature': 0 if seq % 2 else 2})
+        await self.save(36, values={'temperature':5})
+        await self.save(1, run='other', values={'temperature':999})
+        latest = await self.store.history('CNC_01', 'telemetry', 31, 0, 'run-1', latest=True)
+        self.assertEqual([r['sequence'] for r in latest], list(range(36,5,-1)))
+        forward = await self.store.history('CNC_01', 'telemetry', 2, 0, 'run-1')
+        self.assertEqual([r['sequence'] for r in forward], [1,2])
+        result = await assess_predictive_health(self.store, asset_id='CNC_01', run_id='run-1')
+        self.assertEqual(result.status, 'CRITICAL')
+        self.assertEqual(result.top_signals[0].baseline_mean, 1)
+        self.assertEqual(result.observations_used, 31)
